@@ -1,0 +1,12 @@
+# Lecturer-provided framework (local only)
+/bkitevsim/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Editor
+.vscode/
+.idea/

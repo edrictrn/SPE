@@ -32,6 +32,16 @@ class SpeCoEventLoop(BkSysCoEventLoop):
         # Replace original event queue
         self._event_queue = _CoroutineEventQueue()
 
+        # Auditable counters for asynchronous behavior. Do not infer a real
+        # asyncio context-switch count from the framework's unused field.
+        self.stats.update({
+            "buffered_event_reads": 0,
+            "event_waits_registered": 0,
+            "event_waits_resumed": 0,
+            "virtual_timeouts": 0,
+            "lp_cancellations": 0,
+        })
+
     def _create_lp_tasks(self):
         """Handle LP cancellation without stopping the simulation."""
 
@@ -39,7 +49,8 @@ class SpeCoEventLoop(BkSysCoEventLoop):
             try:
                 await coroutine_factory()
             except asyncio.CancelledError:
-                # Cancelled LP terminates normally.
+                # A deliberately cancelled LP is not an experiment failure.
+                self.stats["lp_cancellations"] += 1
                 return
 
         for lp_id, coroutine_factory in list(self._lp_coroutines.items()):
@@ -47,6 +58,7 @@ class SpeCoEventLoop(BkSysCoEventLoop):
                 self._lp_coroutines[lp_id] = asyncio.create_task(
                     run_lp(coroutine_factory)
                 )
+                self.stats["coroutines_scheduled"] += 1
     
 
     def run(self, max_iterations=None):
@@ -63,64 +75,121 @@ class SpeCoEventLoop(BkSysCoEventLoop):
         return stats
 
     async def wait_for_event(self, lp_id, event_type, timeout=None):
-        """Wait for an event with an optional *virtual-time* deadline."""
-        if timeout is None:
-            return await super().wait_for_event(lp_id, event_type, timeout=None)
-        if not math.isfinite(timeout) or timeout < 0:
+        """Wait without blocking other LPs; deadlines use simulation time.
+
+        The framework buffers incoming messages in LP._pending_events.
+        Consume those messages before registering a Future, otherwise an
+        event that arrived earlier is ignored and the request can time out.
+        """
+        if timeout is not None and (not math.isfinite(timeout) or timeout < 0):
             raise ValueError("timeout must be a finite non-negative number")
 
+        lp = self._lp_instances.get(lp_id)
+        if lp is None:
+            raise ValueError(f"Unknown waiting LP {lp_id}")
+
+        # FCFS within the requested event type. Keep unrelated types buffered.
+        for index, pending in enumerate(lp._pending_events):
+            if pending.event_type == event_type:
+                self.stats["buffered_event_reads"] += 1
+                return lp._pending_events.pop(index)
+
         event_future = self.create_future()
-        timer_future = self.create_future()
-        deadline = self.current_time + timeout
+        timer_future = None
         self._event_waiters[event_type].append((lp_id, event_future))
-        self._time_waiters.push((deadline, lp_id, timer_future), priority=deadline)
+        self.stats["event_waits_registered"] += 1
         self._lp_status[lp_id] = BkSysCoLPStatus.WAITING_EVENT
         self._lp_waiting_for[lp_id] = event_type
 
+        if timeout is not None:
+            timer_future = self.create_future()
+            deadline = self.current_time + timeout
+            self._time_waiters.push((deadline, lp_id, timer_future), priority=deadline)
+
         try:
+            if timer_future is None:
+                result = await event_future
+                self.stats["event_waits_resumed"] += 1
+                return result
+
             done, _ = await asyncio.wait(
                 (event_future, timer_future),
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            # If both complete at exactly the deadline, prefer delivery.
             if event_future in done:
+                self.stats["event_waits_resumed"] += 1
                 return event_future.result()
+            self.stats["virtual_timeouts"] += 1
             raise asyncio.TimeoutError(
                 f"Timeout waiting for {event_type!r} at simulation time {deadline}"
             )
         finally:
+            # Remove only this particular waiter; another LP may wait for
+            # the same type concurrently.
             self._event_waiters[event_type] = [
-                (lid, future) for lid, future in self._event_waiters[event_type]
+                (lid, future)
+                for lid, future in self._event_waiters[event_type]
                 if future is not event_future
             ]
             if not event_future.done():
                 event_future.cancel()
-            if not timer_future.done():
+            if timer_future is not None and not timer_future.done():
                 timer_future.cancel()
             self._lp_status[lp_id] = BkSysCoLPStatus.READY
             self._lp_waiting_for.pop(lp_id, None)
 
-
     def _process_events_at_current_time(self):
-        """Reject events targeting an unregistered LP."""
-        previous_callback = self._on_event
+        """Deliver events exactly once and propagate handler/route errors.
 
-        def validate_receiver(event):
-            if event.receiver_id not in self._lp_instances:
+        Unlike the framework default, do not log-and-swallow exceptions from
+        LP.handle_event(): a broken experiment must not look successful.
+        """
+        count = 0
+        while not self._event_queue.is_empty():
+            event = self._event_queue.peek()
+            if event is None or event.timestamp > self._current_time:
+                break
+            event = self._event_queue.pop()
+
+            lp = self._lp_instances.get(event.receiver_id)
+            if lp is None:
                 raise ValueError(
                     f"Unknown receiver LP {event.receiver_id} "
                     f"for event {event.event_type!r}"
                 )
 
-            if previous_callback is not None:
-                previous_callback(event)
+            if self._on_event is not None:
+                self._on_event(event)
 
-        self._on_event = validate_receiver
+            # Keep the LP's local virtual clock causally consistent.
+            lp.set_local_virt_time(event.timestamp)
+            lp.handle_event(event)  # Intentionally propagate exceptions.
 
-        try:
-            return super()._process_events_at_current_time()
-        finally:
-            self._on_event = previous_callback
+            # A delivery may have been buffered by the default handle_event.
+            # If a Future is already waiting, consume *that exact event* from
+            # the buffer so a later wait_for cannot receive it twice.
+            waiters = self._event_waiters.get(event.event_type, [])
+            for target_id, future in waiters:
+                if target_id == event.receiver_id and not future.done():
+                    pending = getattr(lp, "_pending_events", None)
+                    if pending is not None:
+                        for index, buffered in enumerate(pending):
+                            if buffered is event:
+                                pending.pop(index)
+                                break
+                    future.set_result(event)
+                    self._lp_status[target_id] = BkSysCoLPStatus.READY
+                    break  # One message must not resolve multiple waiters.
 
+            self._event_waiters[event.event_type] = [
+                (target_id, future)
+                for target_id, future in waiters
+                if not future.done()
+            ]
+            count += 1
+            self.stats["events_processed"] += 1
+        return count
 
     def schedule_event(self, event):
         # Reject events scheduled in the past

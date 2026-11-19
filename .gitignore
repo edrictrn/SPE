@@ -3,10 +3,13 @@
 
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 .pytest_cache/
 .venv/
 
 # Editor
 .vscode/
 .idea/
+
+# Generated experiment results
+/results/

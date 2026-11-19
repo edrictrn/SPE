@@ -1,23 +1,17 @@
 
+"""Basic SPE event queue edge cases; ordering is covered in test_spe_event_queue."""
+
 import unittest
 
-from bkitevsim.core import Event
-from bkitevsim.queues import LadderQueue
+from spe_core.event_queue import EventQueue
 
 
 class TestEventQueue(unittest.TestCase):
-
-    def test_timestamp_order(self):
-        queue = LadderQueue()
-
-        queue.push(Event(1023, 0, 1, "A"))
-        queue.push(Event(1024, 0, 1, "B"))
-
-        first = queue.pop()
-        second = queue.pop()
-
-        self.assertEqual(first.timestamp, 1023)
-        self.assertEqual(second.timestamp, 1024)
+    def test_empty_queue(self):
+        queue = EventQueue()
+        self.assertTrue(queue.is_empty())
+        self.assertIsNone(queue.peek())
+        self.assertIsNone(queue.pop())
 
 
 if __name__ == "__main__":

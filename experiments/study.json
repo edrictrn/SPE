@@ -1,0 +1,17 @@
+{
+  "duration": 1000,
+  "seeds": [101, 202, 303, 404, 505],
+  "cases": [
+    {"id":"mm1","model":"mm1","arrival_rates":[0.3,0.6,0.9],"service_rate":1.0},
+    {"id":"mm1k-k2","model":"mm1k","arrival_rates":[0.3,0.6,0.9],"service_rate":1.0,"capacity":2},
+    {"id":"mm1k-k5","model":"mm1k","arrival_rates":[0.6],"service_rate":1.0,"capacity":5},
+    {"id":"mminf","model":"mminf","arrival_rates":[0.3,0.6,0.9],"service_rate":1.0},
+    {"id":"mmnn-n2","model":"mmnn","arrival_rates":[0.3,0.6,0.9],"service_rate":1.0,"servers":2},
+    {"id":"mmc-c2","model":"mmc","arrival_rates":[0.3,0.6,0.9],"service_rate":1.0,"servers":2},
+    {"id":"mmc-c1","model":"mmc","arrival_rates":[0.6],"service_rate":1.0,"servers":1},
+    {"id":"mmck-c2-k2","model":"mmck","arrival_rates":[0.3,0.6,0.9],"service_rate":1.0,"servers":2,"capacity":2},
+    {"id":"mmck-c2-k5","model":"mmck","arrival_rates":[0.6],"service_rate":1.0,"servers":2,"capacity":5},
+    {"id":"tandem","model":"tandem","arrival_rates":[0.3,0.6,0.9],"service_rate":1.0,"service_rate_2":1.0},
+    {"id":"mm1-overload","model":"mm1","arrival_rates":[1.2],"service_rate":1.0,"overload":true}
+  ]
+}
